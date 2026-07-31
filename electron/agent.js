@@ -114,6 +114,64 @@ function parseClaudeAliases(help) {
   return aliases.map((a) => a.slice(1, -1));
 }
 
+// The rest of the catalog: every model the harness's provider publishes, from
+// the models.dev index (the same public catalog other agents use). Local
+// history only knows what this machine has already run — this is how a model
+// released yesterday shows up in the dropdown.
+//
+// The index is one 3MB document for 170+ providers, so it's reduced to ids on
+// the way in and cached for a day. Offline, or if it moves, the local sources
+// still stand on their own: this never throws and never blocks a run.
+const CATALOG_URL = 'https://models.dev/api.json';
+const CATALOG_FILE = path.join(os.tmpdir(), 'stacki-models.json');
+const CATALOG_TTL = 24 * 60 * 60 * 1000;
+const CATALOG_TIMEOUT = 10000;
+
+// Coding harnesses can only drive models that take tool calls and answer in
+// text — image and embedding models would just be dead entries in the list.
+const usable = (m) => m?.tool_call && m.modalities?.output?.includes('text');
+
+function reduceCatalog(data) {
+  const out = {};
+  for (const [provider, entry] of Object.entries(data || {})) {
+    const models = Object.values(entry?.models || {})
+      .filter(usable)
+      .sort((a, b) => String(b.release_date || '').localeCompare(String(a.release_date || '')))
+      .map((m) => m.id);
+    if (models.length) out[provider] = models;
+  }
+  return out;
+}
+
+let catalogPromise = null;
+
+async function catalog() {
+  try {
+    const stat = fs.statSync(CATALOG_FILE);
+    if (Date.now() - stat.mtimeMs < CATALOG_TTL) {
+      return JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf8'));
+    }
+  } catch {
+    /* not fetched yet, or unreadable */
+  }
+  const res = await fetch(CATALOG_URL, { signal: AbortSignal.timeout(CATALOG_TIMEOUT) });
+  if (!res.ok) throw new Error(`models.dev: ${res.status}`);
+  const reduced = reduceCatalog(await res.json());
+  try {
+    fs.writeFileSync(CATALOG_FILE, JSON.stringify(reduced));
+  } catch {
+    /* no cache, just a fetch per app run */
+  }
+  return reduced;
+}
+
+async function catalogModels(provider) {
+  if (!provider) return [];
+  // One fetch per app run at most, however many harnesses ask.
+  catalogPromise = catalogPromise || catalog().catch(() => ({}));
+  return (await catalogPromise)[provider] || [];
+}
+
 // Claude only streams structured events in print mode, and only with
 // --verbose alongside.
 const CLAUDE_JSON = ['--output-format', 'stream-json', '--verbose'];
@@ -186,6 +244,7 @@ const HARNESSES = [
     parse: parseClaude,
     hasModel: true,
     modelFlag: (m) => ['--model', m],
+    provider: 'anthropic',
     models: { cmd: ['--help'], parse: parseClaudeAliases, scan: claudeModels },
   },
   {
@@ -218,6 +277,7 @@ const HARNESSES = [
     parse: parseCodex,
     hasModel: true,
     modelFlag: (m) => ['--model', m],
+    provider: 'openai',
     models: { scan: codexModels },
   },
 ];
@@ -277,15 +337,19 @@ function askCli(h, harnessId) {
   });
 }
 
-// Everything this install can offer: the aliases the CLI documents, then the
-// concrete model names it has actually run with. Aliases first — they're the
-// short names people type — and duplicates collapse.
+// Everything this install can offer, in the order people reach for it: the
+// aliases the CLI documents, then the models this machine has actually run,
+// then the provider's full catalog. Duplicates collapse, and a source that
+// fails contributes nothing rather than breaking the list.
 async function listModels(harnessId) {
   const h = HARNESSES.find((x) => x.id === harnessId);
   if (!h?.hasModel) return [];
-  const fromCli = await askCli(h, harnessId);
+  const [fromCli, fromCatalog] = await Promise.all([
+    askCli(h, harnessId),
+    catalogModels(h.provider),
+  ]);
   const fromDisk = h.models?.scan ? h.models.scan() : [];
-  return [...new Set([...fromCli, ...fromDisk])];
+  return [...new Set([...fromCli, ...fromDisk, ...fromCatalog])];
 }
 
 let current = null; // { proc, id }
