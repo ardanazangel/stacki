@@ -114,8 +114,8 @@ function parseClaudeAliases(help) {
   return aliases.map((a) => a.slice(1, -1));
 }
 
-// The rest of the catalog: every model the harness's provider publishes, from
-// the models.dev index (the same public catalog other agents use). Local
+// The rest of the catalog: the models the harness's provider currently ships,
+// from the models.dev index (the same public catalog other agents use). Local
 // history only knows what this machine has already run — this is how a model
 // released yesterday shows up in the dropdown.
 //
@@ -131,12 +131,32 @@ const CATALOG_TIMEOUT = 10000;
 // text — image and embedding models would just be dead entries in the list.
 const usable = (m) => m?.tool_call && m.modalities?.output?.includes('text');
 
+// And only what's current: a provider's catalog keeps every model it ever
+// shipped, so without this the dropdown fills with retired names (o3,
+// claude-opus-4-1, dated duplicates of models already listed). Anything
+// published or revised in the last six months counts as current; if a
+// provider has shipped nothing in that window, its newest per family stands
+// in, so the list is never empty.
+const FRESH_DAYS = 183;
+const dateOf = (m) => String(m.last_updated || m.release_date || '');
+
+function currentModels(models) {
+  const cutoff = new Date(Date.now() - FRESH_DAYS * 86400000).toISOString().slice(0, 10);
+  const fresh = models.filter((m) => dateOf(m) >= cutoff);
+  if (fresh.length) return fresh;
+  const newest = new Map();
+  for (const m of models) {
+    const key = m.family || m.id;
+    if (dateOf(m) >= dateOf(newest.get(key) || {})) newest.set(key, m);
+  }
+  return [...newest.values()];
+}
+
 function reduceCatalog(data) {
   const out = {};
   for (const [provider, entry] of Object.entries(data || {})) {
-    const models = Object.values(entry?.models || {})
-      .filter(usable)
-      .sort((a, b) => String(b.release_date || '').localeCompare(String(a.release_date || '')))
+    const models = currentModels(Object.values(entry?.models || {}).filter(usable))
+      .sort((a, b) => dateOf(b).localeCompare(dateOf(a)))
       .map((m) => m.id);
     if (models.length) out[provider] = models;
   }
