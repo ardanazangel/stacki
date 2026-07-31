@@ -240,16 +240,29 @@ function listModels(harnessId) {
 let current = null; // { proc, id }
 let runSeq = 0;
 
+// Esc has to stop the run now. A harness shells out for its tools, and those
+// children inherit the pipes: signalling only the parent leaves them holding
+// stdout open, so the run reads as still busy long after it was cancelled.
+// Hence the whole process group, with SIGKILL close behind SIGTERM.
 function cancel() {
   if (!current) return { ok: false };
   const { proc } = current;
   current = null;
-  try {
-    if (isWin) spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { shell: true });
-    else proc.kill('SIGTERM');
-  } catch {
-    /* already gone */
-  }
+  const signal = (sig) => {
+    try {
+      if (isWin) spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { shell: true });
+      else process.kill(-proc.pid, sig); // negative pid = the group
+    } catch {
+      try {
+        proc.kill(sig); // group already gone, or never made one
+      } catch {
+        /* already dead */
+      }
+    }
+  };
+  signal('SIGTERM');
+  const hard = setTimeout(() => signal('SIGKILL'), 2000);
+  proc.once('close', () => clearTimeout(hard));
   return { ok: true };
 }
 
@@ -418,6 +431,7 @@ function run(send, { harnessId, prompt, cwd, resume, model }) {
       cwd,
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: !isWin, // its own process group, so cancel can take the tools down too
     });
   } catch (e) {
     return Promise.resolve({ ok: false, error: String(e.message || e) });
