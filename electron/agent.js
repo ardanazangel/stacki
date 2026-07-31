@@ -7,7 +7,7 @@
 // deps, but no TUI and no mid-run approval prompts — every harness runs with
 // its "don't ask" flag. Upgrade path: node-pty + xterm.js.
 
-const { spawn, execFile } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -375,6 +375,57 @@ async function listModels(harnessId) {
 let current = null; // { proc, id }
 let runSeq = 0;
 
+// A clean quit cancels the run, but a crash, a force-quit or a `kill -9`
+// never reaches before-quit — and the harness lives in its own process group,
+// so it survives the app and keeps writing to the project with nobody
+// watching. The live run is recorded on disk and whatever a previous session
+// left behind is taken down at startup.
+//
+// ponytail: the orphan still runs until the next launch, and the check is
+// POSIX-only (`ps` to confirm the pid wasn't recycled). Upgrade path: a job
+// object on Windows, and a heartbeat the harness wrapper watches.
+const LIVE_FILE = path.join(os.tmpdir(), 'stacki-agent-run.json');
+
+const forget = () => {
+  try {
+    fs.rmSync(LIVE_FILE, { force: true });
+  } catch {
+    /* nothing to clear */
+  }
+};
+
+const remember = (pid, bin) => {
+  try {
+    fs.writeFileSync(LIVE_FILE, JSON.stringify({ pid, bin }));
+  } catch {
+    /* no record just means no cleanup next time */
+  }
+};
+
+function killOrphan() {
+  let rec;
+  try {
+    rec = JSON.parse(fs.readFileSync(LIVE_FILE, 'utf8'));
+  } catch {
+    return; // nothing recorded: the last run ended cleanly
+  }
+  forget();
+  if (!rec?.pid || isWin) return;
+  try {
+    // The pid may have been recycled since; only kill it if it is still the
+    // harness we spawned.
+    const cmd = execFileSync('ps', ['-o', 'command=', '-p', String(rec.pid)], {
+      encoding: 'utf8',
+    });
+    if (!cmd.includes(rec.bin)) return;
+    process.kill(-rec.pid, 'SIGKILL');
+  } catch {
+    /* already gone */
+  }
+}
+
+killOrphan();
+
 // Esc has to stop the run now. A harness shells out for its tools, and those
 // children inherit the pipes: signalling only the parent leaves them holding
 // stdout open, so the run reads as still busy long after it was cancelled.
@@ -398,6 +449,7 @@ function cancel() {
   signal('SIGTERM');
   const hard = setTimeout(() => signal('SIGKILL'), 2000);
   proc.once('close', () => clearTimeout(hard));
+  forget();
   return { ok: true };
 }
 
@@ -572,6 +624,7 @@ function run(send, { harnessId, prompt, cwd, resume, model }) {
     return Promise.resolve({ ok: false, error: String(e.message || e) });
   }
   current = { proc, id: runId };
+  remember(proc.pid, bin);
 
   return new Promise((resolve) => {
     const push = (kind, text) => {
@@ -615,6 +668,7 @@ function run(send, { harnessId, prompt, cwd, resume, model }) {
     proc.on('close', (code) => {
       const cancelled = current?.id !== runId;
       if (!cancelled) current = null;
+      forget();
       // The diff is computed here, once, while the snapshot is certainly still
       // around: the panel gets it with the result instead of asking again.
       const changes = snapshotId ? diffRun(snapshotId, cwd) : [];
