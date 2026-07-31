@@ -1106,6 +1106,33 @@ function resolveIdentifierDefaults(schema, source, filePath, projectPath) {
 }
 
 // ---------------------------------------------------------------------------
+// Chat — CLI coding harnesses (see electron/agent.js)
+// ---------------------------------------------------------------------------
+
+const agent = require('./agent');
+
+ipcMain.handle('agent:list', async () => {
+  ensureToolPath();
+  return agent.listHarnesses();
+});
+
+ipcMain.handle('agent:models', async (_e, harnessId) => {
+  ensureToolPath();
+  return agent.listModels(harnessId);
+});
+
+ipcMain.handle('agent:run', async (_e, opts) => {
+  ensureToolPath();
+  return agent.run(send, opts || {});
+});
+
+ipcMain.handle('agent:cancel', async () => agent.cancel());
+
+ipcMain.handle('agent:revert', async (_e, opts) => agent.revert(opts || {}));
+
+app.on('before-quit', () => agent.cancel());
+
+// ---------------------------------------------------------------------------
 // File watching — reflect external edits back into the app
 // ---------------------------------------------------------------------------
 

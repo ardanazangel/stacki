@@ -616,6 +616,18 @@ contextBridge.exposeInMainWorld('avb', {
     return () => ipcRenderer.removeListener('fs:changed', listener);
   },
 
+  // Chat (CLI coding harnesses)
+  listHarnesses: invoke('agent:list'),
+  listAgentModels: invoke('agent:models'),
+  runAgent: invoke('agent:run'),
+  cancelAgent: invoke('agent:cancel'),
+  revertAgentRun: invoke('agent:revert'),
+  onAgentChunk: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('agent:chunk', listener);
+    return () => ipcRenderer.removeListener('agent:chunk', listener);
+  },
+
   // Application menu events (macOS menu accelerators never reach the DOM)
   onMenu: (channel, cb) => {
     const listener = () => cb();

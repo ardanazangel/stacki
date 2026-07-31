@@ -13,6 +13,7 @@ import PageSwitcher from './ui/PageSwitcher.jsx';
 import InsertSearch from './ui/InsertSearch.jsx';
 import AssetsPanel from './panels/AssetsPanel.jsx';
 import CmsPanel from './panels/CmsPanel.jsx';
+import ChatPanel from './panels/ChatPanel.jsx';
 import CmsView from './panels/CmsView.jsx';
 import { getElementSchema, GLOBAL_ATTRS, canContainTag } from './elementSchemas.js';
 import { onAssetRequest, clearAssetRequest } from './assetPick.js';
@@ -2025,6 +2026,57 @@ export default function App() {
     const trail = pathOfNode(model.nodes, id);
     return trail ? trail.join('.') : null;
   };
+
+  // What the chat attaches when something is picked on the canvas. It has to
+  // address one exact node, not "an element with this class": the ancestor
+  // trail, the position among its siblings and the full opening tag together
+  // leave no other candidate in the file.
+  const chatSelection = (() => {
+    if (!currentPage || !selectedNode) return null;
+    const rel = project ? currentPage.path.replace(`${project.path}/`, '') : currentPage.path;
+    const attrs = (props) =>
+      Object.entries(props || {})
+        .map(([k, v]) =>
+          v == null || v.type === 'bare'
+            ? k
+            : v.type === 'expr'
+              ? `${k}={${v.value}}`
+              : `${k}="${String(v.value).replace(/"/g, '&quot;')}"`
+        )
+        .join(' ');
+    const tagOf = (n) => {
+      const cls = n.props?.class;
+      const first = cls?.type === 'string' ? cls.value.trim().split(/\s+/)[0] : null;
+      return `${n.name || n.kind}${first ? `.${first}` : ''}`;
+    };
+    const chain = ancestorChain(model.nodes, selectedId) || [];
+    const trail = pathOfNode(model.nodes, selectedId) || [];
+    const open =
+      selectedNode.kind === 'element' || selectedNode.kind === 'component'
+        ? `<${selectedNode.name}${attrs(selectedNode.props) ? ` ${attrs(selectedNode.props)}` : ''}>`
+        : null;
+    // First line of content, so the harness can confirm it landed on the right
+    // node when several siblings share the same markup.
+    const firstText = (n) => {
+      if (n.kind === 'text') return n.value;
+      for (const c of n.children || []) {
+        const t = firstText(c);
+        if (t && t.trim()) return t;
+      }
+      return null;
+    };
+    return {
+      key: `${currentPage.path}:${selectedId}`,
+      label: crumbLabel(selectedNode),
+      file: rel,
+      tag: selectedNode.name || selectedNode.kind,
+      open,
+      text: (firstText(selectedNode) || '').trim().slice(0, 120) || null,
+      chain: chain.map(tagOf).join(' > '),
+      nth: trail.length ? trail[trail.length - 1] + 1 : null,
+      path: pathFor(selectedId),
+    };
+  })();
   // Picking a component swaps the right panel to Settings — its props are the
   // only thing there is to edit on it; picking a plain element (or a dynamic
   // tag, which renders one) swaps back to Style. Anything else — frontmatter,
@@ -2244,6 +2296,9 @@ export default function App() {
                 pick={assetPick}
                 onPickCancel={endAssetPick}
               />
+            )}
+            {leftTab === 'chat' && (
+              <ChatPanel project={project} showToast={showToast} selection={chatSelection} />
             )}
           </div>
         )}

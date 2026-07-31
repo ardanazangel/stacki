@@ -87,6 +87,18 @@ export const PlusIcon = (p) => (
   </I>
 );
 
+export const ArrowUpIcon = (p) => (
+  <I {...p}>
+    <path d="M8 13V3.5M4 7.5 8 3.5l4 4" />
+  </I>
+);
+
+export const StopIcon = (p) => (
+  <I {...p}>
+    <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" />
+  </I>
+);
+
 export const RefreshIcon = (p) => (
   <I {...p}>
     <path d="M13 8a5 5 0 1 1-1.47-3.54" />
@@ -527,6 +539,14 @@ export const CmsIcon = ({ size = 24, className, style }) => (
       fill="currentColor"
     />
   </svg>
+);
+
+// Four-point sparkle: the shorthand for "this is the AI bit".
+export const ChatIcon = (p) => (
+  <I strokeWidth={1} {...p}>
+    <path d="M9.2 1.8 10.4 5 13.6 6.2 10.4 7.4 9.2 10.6 8 7.4 4.8 6.2 8 5Z" />
+    <path d="M4.3 9.7 4.9 11.3 6.5 11.9 4.9 12.5 4.3 14.1 3.7 12.5 2.1 11.9 3.7 11.3Z" />
+  </I>
 );
 
 export const PagePanelIcon = (p) => (
