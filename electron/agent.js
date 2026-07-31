@@ -17,15 +17,21 @@ const isWin = process.platform === 'win32';
 // Chatter the CLIs print regardless: not events, not worth a line in the panel.
 const NOISE = /^(Reading additional input from stdin|warning: `--full-auto`)/;
 
-// Codex has no `models` command. Its config names the default, and every
-// session file records the model it ran with, which is the closest thing to
-// "models this machine can actually use". Only the head of each file is read
-// (the model sits in the turn_context line, past a fat instructions blob) and
-// only the newest few are looked at — the directory is dated, so filename
-// order is recency order.
-const CODEX_DIR = path.join(os.homedir(), '.codex');
+// Neither CLI can list its models. What each one *can* tell us is what this
+// machine actually runs: the model named in its config, and the models past
+// sessions recorded. That beats a hardcoded list, which goes stale the day a
+// provider ships a new name.
+//
+// Session logs are the expensive part — 250MB of them is not unusual — so the
+// walk is bounded three ways: newest files first, only the head of each, and
+// a total byte budget. It stops early once it has a plausible catalog.
+const HOME = os.homedir();
 
-function headOf(file, bytes = 96 * 1024) {
+const SCAN_HEAD = 256 * 1024; // per file
+const SCAN_BUDGET = 8 << 20; // total bytes read
+const SCAN_ENOUGH = 8; // models after which the rest adds nothing
+
+function headOf(file, bytes = SCAN_HEAD) {
   let fd;
   try {
     fd = fs.openSync(file, 'r');
@@ -39,31 +45,73 @@ function headOf(file, bytes = 96 * 1024) {
   }
 }
 
-function codexModels() {
+// Newest first. Session filenames are dated for some CLIs and random UUIDs
+// for others, so mtime is the only ordering that holds for both.
+function newestFirst(dir) {
+  return fs
+    .readdirSync(dir, { recursive: true })
+    .filter((f) => String(f).endsWith('.jsonl'))
+    .map((f) => {
+      const full = path.join(dir, String(f));
+      try {
+        return { full, at: fs.statSync(full).mtimeMs };
+      } catch {
+        return { full, at: 0 };
+      }
+    })
+    .sort((a, b) => b.at - a.at)
+    .map((e) => e.full);
+}
+
+function scanModels({ config, configRe, sessions, sessionRe, skip }) {
   const found = new Set();
-  const config = path.join(CODEX_DIR, 'config.toml');
+  const keep = (m) => m && !skip?.test(m) && found.add(m);
   try {
-    for (const m of fs.readFileSync(config, 'utf8').matchAll(/^\s*model\s*=\s*"([^"]+)"/gm)) {
-      found.add(m[1]);
-    }
+    for (const m of fs.readFileSync(config, 'utf8').matchAll(configRe)) keep(m[1]);
   } catch {
     /* no config yet */
   }
   try {
-    const sessions = path.join(CODEX_DIR, 'sessions');
-    const files = fs
-      .readdirSync(sessions, { recursive: true })
-      .filter((f) => String(f).endsWith('.jsonl'))
-      .sort()
-      .slice(-30);
-    for (const f of files) {
-      const m = headOf(path.join(sessions, String(f))).match(/"model"\s*:\s*"([^"]+)"/);
-      if (m) found.add(m[1]);
+    let budget = SCAN_BUDGET;
+    for (const file of newestFirst(sessions)) {
+      if (budget <= 0 || found.size >= SCAN_ENOUGH) break;
+      const head = headOf(file, Math.min(SCAN_HEAD, budget));
+      budget -= head.length;
+      for (const m of head.matchAll(sessionRe)) keep(m[1]);
     }
   } catch {
     /* no sessions yet */
   }
   return [...found];
+}
+
+const codexModels = () =>
+  scanModels({
+    config: path.join(HOME, '.codex', 'config.toml'),
+    configRe: /^\s*model\s*=\s*"([^"]+)"/gm,
+    sessions: path.join(HOME, '.codex', 'sessions'),
+    sessionRe: /"model"\s*:\s*"([^"]+)"/g,
+  });
+
+// Claude logs a turn per line and tags internal turns as <synthetic>, which
+// is not a model anyone can pick.
+const claudeModels = () =>
+  scanModels({
+    config: path.join(HOME, '.claude', 'settings.json'),
+    configRe: /"model"\s*:\s*"([^"]+)"/g,
+    sessions: path.join(HOME, '.claude', 'projects'),
+    sessionRe: /"model"\s*:\s*"(claude-[^"]+)"/g,
+    skip: /^<|^default$/,
+  });
+
+// The aliases Claude documents for --model ('opus', 'sonnet', …). They change
+// with the CLI, so they're read from its own help rather than pinned here.
+// Everything after "full name" is an example of a versioned name, not an alias.
+function parseClaudeAliases(help) {
+  const flat = help.replace(/\s+/g, ' ');
+  const block = flat.match(/--model <model>(.*?)(?:-[a-zA-Z-]+ [<[]|$)/)?.[1] || '';
+  const aliases = block.split('full name')[0].match(/'[a-z0-9][a-z0-9.-]*'/g) || [];
+  return aliases.map((a) => a.slice(1, -1));
 }
 
 // Claude only streams structured events in print mode, and only with
@@ -113,8 +161,8 @@ function parseCodex(evt) {
 // wants it — subcommand-based ones reject a leading --model. `resume`
 // continues the last session in this cwd; omit it and every message starts
 // clean. `hasModel` marks harnesses that accept a model at all; `models` is
-// the catalog the panel offers (the CLI's own list, or a static set), and
-// without one the panel falls back to free text.
+// the catalog the panel offers — `cmd`/`parse` asks the CLI, `scan` reads what
+// this machine has run — and without one the panel falls back to free text.
 //
 // `parse` turns one line of the CLI's JSON stream into normalised events:
 // kind 'text' is the answer, 'thinking' and 'tool' are the work behind it,
@@ -138,7 +186,7 @@ const HARNESSES = [
     parse: parseClaude,
     hasModel: true,
     modelFlag: (m) => ['--model', m],
-    models: { static: ['opus', 'sonnet', 'haiku'] },
+    models: { cmd: ['--help'], parse: parseClaudeAliases, scan: claudeModels },
   },
   {
     id: 'codex',
@@ -170,8 +218,6 @@ const HARNESSES = [
     parse: parseCodex,
     hasModel: true,
     modelFlag: (m) => ['--model', m],
-    // No listing command, so the catalog is whatever this install actually
-    // uses: the configured model plus the ones seen in recent sessions.
     models: { scan: codexModels },
   },
 ];
@@ -202,17 +248,12 @@ function listHarnesses() {
   })).filter((h) => h.bin);
 }
 
-// The CLI's own model catalog, when it has one. Cached: some of these take a
-// second and the list doesn't change while the app is open.
+// Asking the CLI costs a process spawn and its answer doesn't change while
+// the app is open, so only that half is cached; the local scan is redone
+// every time, and picks up a model the user just switched to in the CLI.
 const modelCache = new Map();
 
-function listModels(harnessId) {
-  const h = HARNESSES.find((x) => x.id === harnessId);
-  if (!h?.hasModel) return Promise.resolve([]);
-  if (h.models?.static) return Promise.resolve(h.models.static);
-  // Local scan (codex): cheap enough to redo every time, and it picks up a
-  // model the user just switched to in the CLI.
-  if (h.models?.scan) return Promise.resolve(h.models.scan());
+function askCli(h, harnessId) {
   if (!h.models?.cmd) return Promise.resolve([]);
   if (modelCache.has(harnessId)) return Promise.resolve(modelCache.get(harnessId));
   const bin = which(h.bin);
@@ -222,11 +263,10 @@ function listModels(harnessId) {
       bin,
       h.models.cmd,
       { env: { ...process.env, NO_COLOR: '1' }, maxBuffer: 4 << 20, timeout: 20000 },
-      (err, stdout) => {
-        if (err && !stdout) return resolve([]);
+      (err, stdout, stderr) => {
         let out = [];
         try {
-          out = [...new Set(h.models.parse(stdout || ''))];
+          out = h.models.parse(`${stdout || ''}${stderr || ''}`);
         } catch {
           out = [];
         }
@@ -235,6 +275,17 @@ function listModels(harnessId) {
       }
     );
   });
+}
+
+// Everything this install can offer: the aliases the CLI documents, then the
+// concrete model names it has actually run with. Aliases first — they're the
+// short names people type — and duplicates collapse.
+async function listModels(harnessId) {
+  const h = HARNESSES.find((x) => x.id === harnessId);
+  if (!h?.hasModel) return [];
+  const fromCli = await askCli(h, harnessId);
+  const fromDisk = h.models?.scan ? h.models.scan() : [];
+  return [...new Set([...fromCli, ...fromDisk])];
 }
 
 let current = null; // { proc, id }
