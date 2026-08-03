@@ -1106,31 +1106,30 @@ function resolveIdentifierDefaults(schema, source, filePath, projectPath) {
 }
 
 // ---------------------------------------------------------------------------
-// Chat — CLI coding harnesses (see electron/agent.js)
+// Terminal panel — CLI coding harnesses in a real PTY (see electron/terminal.js)
 // ---------------------------------------------------------------------------
 
-const agent = require('./agent');
+const terminal = require('./terminal');
 
-ipcMain.handle('agent:list', async () => {
+// Events go back to whichever renderer asked, rather than through the main
+// window's emitter.
+const replyTo = (event) => (channel, payload) => {
+  if (!event.sender.isDestroyed()) event.sender.send(channel, payload);
+};
+
+ipcMain.handle('term:shells', () => {
   ensureToolPath();
-  return agent.listHarnesses();
+  return terminal.listShells();
 });
-
-ipcMain.handle('agent:models', async (_e, harnessId) => {
+ipcMain.handle('term:open', (e, opts) => {
   ensureToolPath();
-  return agent.listModels(harnessId);
+  return terminal.open(replyTo(e), opts || {});
 });
+ipcMain.handle('term:write', (_e, { id, data } = {}) => terminal.write(id, data));
+ipcMain.handle('term:resize', (_e, { id, cols, rows } = {}) => terminal.resize(id, cols, rows));
+ipcMain.handle('term:close', (_e, { id } = {}) => terminal.close(id));
 
-ipcMain.handle('agent:run', async (_e, opts) => {
-  ensureToolPath();
-  return agent.run(send, opts || {});
-});
-
-ipcMain.handle('agent:cancel', async () => agent.cancel());
-
-ipcMain.handle('agent:revert', async (_e, opts) => agent.revert(opts || {}));
-
-app.on('before-quit', () => agent.cancel());
+app.on('before-quit', () => terminal.closeAll());
 
 // ---------------------------------------------------------------------------
 // File watching — reflect external edits back into the app

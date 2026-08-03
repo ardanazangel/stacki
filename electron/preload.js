@@ -616,16 +616,21 @@ contextBridge.exposeInMainWorld('avb', {
     return () => ipcRenderer.removeListener('fs:changed', listener);
   },
 
-  // Chat (CLI coding harnesses)
-  listHarnesses: invoke('agent:list'),
-  listAgentModels: invoke('agent:models'),
-  runAgent: invoke('agent:run'),
-  cancelAgent: invoke('agent:cancel'),
-  revertAgentRun: invoke('agent:revert'),
-  onAgentChunk: (cb) => {
+  // Terminal panel (CLI coding harnesses in a PTY)
+  listTermShells: invoke('term:shells'),
+  openTerm: invoke('term:open'),
+  writeTerm: invoke('term:write'),
+  resizeTerm: invoke('term:resize'),
+  closeTerm: invoke('term:close'),
+  onTermData: (cb) => {
     const listener = (_e, data) => cb(data);
-    ipcRenderer.on('agent:chunk', listener);
-    return () => ipcRenderer.removeListener('agent:chunk', listener);
+    ipcRenderer.on('term:data', listener);
+    return () => ipcRenderer.removeListener('term:data', listener);
+  },
+  onTermExit: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('term:exit', listener);
+    return () => ipcRenderer.removeListener('term:exit', listener);
   },
 
   // Application menu events (macOS menu accelerators never reach the DOM)
