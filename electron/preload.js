@@ -616,7 +616,9 @@ contextBridge.exposeInMainWorld('avb', {
     return () => ipcRenderer.removeListener('fs:changed', listener);
   },
 
-  // Terminal panel (CLI coding harnesses in a PTY)
+  // Terminal panel (CLI coding harnesses in a PTY). `platform` is here because
+  // Ctrl+C means "interrupt" everywhere except macOS, where it isn't Copy.
+  platform: process.platform,
   listTermShells: invoke('term:shells'),
   openTerm: invoke('term:open'),
   writeTerm: invoke('term:write'),

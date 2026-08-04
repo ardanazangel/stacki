@@ -107,6 +107,7 @@ function TerminalView({ id, cwd, command, visible, onRestart, onTitle }) {
     });
     const claim = () => {
       focused.term = term;
+      focused.id = id;
     };
     hostRef.current.addEventListener('focusin', claim);
 
@@ -121,7 +122,10 @@ function TerminalView({ id, cwd, command, visible, onRestart, onTitle }) {
       offData();
       offExit();
       hostRef.current?.removeEventListener('focusin', claim);
-      if (focused.term === term) focused.term = null;
+      if (focused.term === term) {
+        focused.term = null;
+        focused.id = '';
+      }
       window.avb.closeTerm({ id });
       term.dispose();
       termRef.current = null;
@@ -174,19 +178,27 @@ const MARK = {
   gemini: GeminiMarkIcon,
 };
 
-// The terminal that has the keyboard, for the app menu's Copy/Paste: on macOS
-// the native menu eats ⌘C/⌘V before the page sees them, and xterm draws its
-// selection on a canvas, so neither window.getSelection() nor webContents.copy()
-// can find it. App.jsx asks here instead.
-const focused = { term: null };
+// The terminal that has the keyboard, for the app menu's Copy/Paste: the
+// native menu eats ⌘C/⌘V (Ctrl+C/V off macOS) before the page sees them, and
+// xterm draws its selection on a canvas, so neither window.getSelection() nor
+// webContents.copy() can find it. App.jsx asks here instead.
+const focused = { term: null, id: '' };
 
 export const terminalClipboard = () => {
-  const term = focused.term;
+  const { term, id } = focused;
   if (!term || !document.activeElement?.closest('.xterm')) return null;
   return {
     copy: () => {
       const text = term.getSelection();
-      if (text) navigator.clipboard.writeText(text);
+      if (text) {
+        navigator.clipboard.writeText(text);
+        return;
+      }
+      // Off macOS the Copy accelerator *is* Ctrl+C, the interrupt. With
+      // nothing selected the shell has to get it — and the accelerator already
+      // swallowed the keystroke — so send the character ourselves. This is what
+      // every terminal does: copy on selection, interrupt otherwise.
+      if (window.avb.platform !== 'darwin') window.avb.writeTerm({ id, data: '\x03' });
     },
     // Paste goes through the native command: it lands in xterm's hidden
     // textarea, whose paste handler feeds the PTY. Reading the clipboard from
